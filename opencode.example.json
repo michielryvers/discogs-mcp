@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "discogs": {
+      "type": "local",
+      "enabled": true,
+      "command": [
+        "dotnet",
+        "run",
+        "discogs-mcp.cs"
+      ],
+      "environment": {
+        "DISCOGS_TOKEN": "YOUR_DISCOGS_TOKEN_HERE",
+        "DISCOGS_USER_AGENT": "YourAppName/0.1 (+https://yoursite.example)"
+      }
+    }
+  }
+}
