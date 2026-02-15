@@ -16,7 +16,7 @@
 
     <!-- NuGet metadata -->
     <PackageId>discogs-mcp</PackageId>
-    <Version>0.1.1</Version>
+    <Version>0.2.0</Version>
     <Authors>michielryvers</Authors>
     <Description>MCP server providing full access to the Discogs REST API. Search, browse, and manage your vinyl collection through any MCP client.</Description>
     <PackageProjectUrl>https://github.com/michielryvers/discogs-mcp</PackageProjectUrl>
