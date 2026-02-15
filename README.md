@@ -1,6 +1,6 @@
 # Discogs MCP Server
 
-A Model Context Protocol (MCP) server that provides full access to the Discogs REST API. Built as a single-file C# application.
+A Model Context Protocol (MCP) server that provides full access to the Discogs REST API. Distributed as a .NET tool via NuGet.
 
 ## Tools
 
@@ -20,37 +20,58 @@ A Model Context Protocol (MCP) server that provides full access to the Discogs R
 
 ### Installation
 
-1. Clone the repository:
+No installation required. MCP clients launch the tool on demand using `dnx`.
 
-   ```bash
-   git clone https://github.com/michielryvers/discogs-mcp.git
-   ```
+Add the server to your MCP client configuration:
 
-2. Add the MCP server to your client configuration. For OpenCode, copy and edit the example config:
+**OpenCode** (`opencode.json`):
 
-   ```bash
-   cp opencode.example.json opencode.json
-   ```
+```json
+{
+  "mcp": {
+    "discogs": {
+      "type": "local",
+      "enabled": true,
+      "command": ["dnx", "discogs-mcp", "--yes"],
+      "environment": {
+        "DISCOGS_TOKEN": "your_token_here",
+        "DISCOGS_USER_AGENT": "YourApp/0.1 (+https://yoursite.example)"
+      }
+    }
+  }
+}
+```
 
-   Edit `opencode.json` with your Discogs token:
+**Claude Code** (via `claude mcp add`):
 
-   ```json
-   {
-     "mcp": {
-       "discogs": {
-         "type": "local",
-         "enabled": true,
-         "command": ["dotnet", "run", "/path/to/discogs-mcp/discogs-mcp.cs"],
-         "environment": {
-           "DISCOGS_TOKEN": "your_token_here",
-           "DISCOGS_USER_AGENT": "YourApp/0.1 (+https://yoursite.example)"
-         }
-       }
-     }
-   }
-   ```
+```bash
+claude mcp add discogs -- dnx discogs-mcp --yes
+```
 
-   For other MCP clients, configure the server to run `dotnet run discogs-mcp.cs` with the environment variables `DISCOGS_TOKEN` and `DISCOGS_USER_AGENT`.
+Then set the required environment variables (`DISCOGS_TOKEN`).
+
+**VS Code** (`.vscode/mcp.json`):
+
+```json
+{
+  "servers": {
+    "discogs": {
+      "command": "dnx",
+      "args": ["discogs-mcp", "--yes"],
+      "env": {
+        "DISCOGS_TOKEN": "your_token_here"
+      }
+    }
+  }
+}
+```
+
+### Environment Variables
+
+| Variable             | Required | Description                                      |
+| -------------------- | -------- | ------------------------------------------------ |
+| `DISCOGS_TOKEN`      | Yes      | Your Discogs personal access token               |
+| `DISCOGS_USER_AGENT` | No       | Custom User-Agent string (a default is provided) |
 
 ## Example Prompts
 
@@ -86,6 +107,18 @@ The server provides access to these Discogs API categories:
 - **user** - Profile, submissions, contributions
 - **lists** - User-created lists
 - **inventory** - Bulk inventory management
+
+## Publishing
+
+To publish a new version to NuGet:
+
+```bash
+# Pack the tool
+dotnet pack -c Release
+
+# Push to NuGet.org
+dotnet nuget push ./nupkg/discogs-mcp.0.1.0.nupkg --api-key YOUR_API_KEY --source https://api.nuget.org/v3/index.json
+```
 
 ## License
 

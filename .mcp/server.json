@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.michielryvers/discogs-mcp",
+  "description": "MCP server providing full access to the Discogs REST API. Search, browse, and manage your vinyl collection through any MCP client.",
+      "version": "0.1.1",
+  "packages": [
+    {
+      "registryType": "nuget",
+      "registryBaseUrl": "https://api.nuget.org",
+      "identifier": "discogs-mcp",
+  "version": "0.1.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [],
+      "environmentVariables": [
+        {
+          "name": "DISCOGS_TOKEN",
+          "value": "{discogs_token}",
+          "variables": {
+            "discogs_token": {
+              "description": "Discogs personal access token. Get one at https://www.discogs.com/settings/developers",
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        },
+        {
+          "name": "DISCOGS_USER_AGENT",
+          "value": "{discogs_user_agent}",
+          "variables": {
+            "discogs_user_agent": {
+              "description": "Custom User-Agent string for Discogs API requests (e.g. MyApp/0.1 (+https://mysite.example))",
+              "isRequired": false,
+              "isSecret": false
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "repository": {
+    "url": "https://github.com/michielryvers/discogs-mcp",
+    "source": "github"
+  }
+}

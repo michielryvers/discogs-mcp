@@ -5,9 +5,9 @@
       "type": "local",
       "enabled": true,
       "command": [
-        "dotnet",
-        "run",
-        "discogs-mcp.cs"
+        "dnx",
+        "discogs-mcp",
+        "--yes"
       ],
       "environment": {
         "DISCOGS_TOKEN": "YOUR_DISCOGS_TOKEN_HERE",

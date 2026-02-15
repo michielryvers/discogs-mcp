@@ -1,9 +1,3 @@
-#:package ModelContextProtocol@0.8.0-preview.1
-#:package Microsoft.Extensions.Hosting@10.0.3
-#:package Microsoft.Extensions.Http@10.0.3
-#:property PublishAot=false
-#:property JsonSerializerIsReflectionEnabledByDefault=true
-
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -310,9 +304,27 @@ public static class DiscogsTools
         JsonElement? body,
         string? accept)
     {
-        // Build URI
+        // Build URI — tolerate query strings embedded in path (LLMs commonly do this)
         if (!path.StartsWith('/'))
             path = "/" + path;
+
+        var qsIndex = path.IndexOf('?');
+        if (qsIndex >= 0)
+        {
+            var embeddedQs = path[(qsIndex + 1)..];
+            path = path[..qsIndex];
+            query ??= new Dictionary<string, string>();
+            foreach (var pair in embeddedQs.Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var eqIndex = pair.IndexOf('=');
+                if (eqIndex >= 0)
+                {
+                    var key = Uri.UnescapeDataString(pair[..eqIndex]);
+                    var value = Uri.UnescapeDataString(pair[(eqIndex + 1)..]);
+                    query.TryAdd(key, value); // explicit query dict wins over embedded
+                }
+            }
+        }
 
         var uriBuilder = new UriBuilder(client.BaseAddress!) { Path = path };
 
