@@ -74,12 +74,16 @@ public static class DiscogsTools
             ```
 
             ### 2. `discogs_request` — Call any Discogs endpoint
-            Execute a single API call. The server handles auth and rate limiting.
+            Execute a single API call. The server handles auth and rate limiting. JSON is compact by default.
             ```json
             { "method": "GET", "path": "/database/search", "query": { "q": "Nirvana Nevermind", "type": "release", "per_page": "5" } }
             { "method": "GET", "path": "/releases/249504" }
             { "method": "GET", "path": "/users/{your_username}/collection/folders" }
             { "method": "PUT", "path": "/users/{your_username}/wants/249504", "body": { "notes": "Classic!", "rating": 5 } }
+            { "method": "GET", "path": "/database/search", "query": { "barcode": "042282449917", "type": "release" }, "extract": "results", "view": "light" }
+            { "method": "GET", "path": "/database/search", "query": { "q": "Blue Note", "type": "release" }, "extract": "results", "fields": ["id", "title", "year"] }
+            { "method": "GET", "path": "/releases/249504", "view": "light" }
+            { "method": "GET", "path": "/releases/249504", "pretty": true }
             ```
 
             ### 3. `discogs_paginate` — Iterate over paginated results
@@ -91,6 +95,14 @@ public static class DiscogsTools
               "query": { "q": "Blue Note", "type": "release" },
               "page": 1, "perPage": 50, "maxPages": 3,
               "extract": "results"
+            }
+            {
+              "method": "GET",
+              "path": "/database/search",
+              "query": { "barcode": "042282449917", "type": "release" },
+              "page": 1, "perPage": 10, "maxPages": 2,
+              "extract": "results",
+              "view": "light"
             }
             ```
 
@@ -105,6 +117,8 @@ public static class DiscogsTools
             - All paths start with `/` (e.g. `/releases/249504`).
             - Query params are key-value string pairs.
             - Rate limiting: the server respects Discogs rate limits (60 req/min for authenticated users).
+            - `view` defaults to `auto` (lists → light summaries; single objects → full).
+            - `fields` applies to list items when a list is present.
             """;
     }
 
@@ -173,7 +187,7 @@ public static class DiscogsTools
     // ── discogs_request ──────────────────────────────────────────────────
 
     [McpServerTool(Name = "discogs_request"),
-     Description("Call any Discogs REST API endpoint. The server handles authentication, User-Agent, and rate-limit headers. Returns status, headers, and parsed JSON (or raw text).")]
+     Description("Call any Discogs REST API endpoint. The server handles authentication, User-Agent, and rate-limit headers. Returns status, headers, and parsed JSON (or raw text) with compact JSON by default.")]
     public static async Task<string> Request(
         IHttpClientFactory httpClientFactory,
         [Description("HTTP method: GET, POST, PUT, DELETE, PATCH")]
@@ -184,18 +198,46 @@ public static class DiscogsTools
         Dictionary<string, string>? query = null,
         [Description("JSON body for write calls (optional)")]
         JsonElement? body = null,
+        [Description("Extract a JSON property from the response (optional)")]
+        string? extract = null,
+        [Description("Select a subset of fields from list items or arrays (optional)")]
+        string[]? fields = null,
+        [Description("Response view: full, light, or auto (default auto)")]
+        string? view = null,
         [Description("Accept header override (optional, defaults to application/vnd.discogs.v2+json)")]
-        string? accept = null)
+        string? accept = null,
+        [Description("Pretty-print JSON output (default false)")]
+        bool pretty = false)
     {
         var client = httpClientFactory.CreateClient("discogs");
         var result = await ExecuteDiscogsRequest(client, method, path, query, body, accept);
-        return JsonSerializer.Serialize(result, JsonOpts.Indented);
+
+        if (result.Json.HasValue)
+        {
+            var json = result.Json.Value;
+
+            if (!string.IsNullOrWhiteSpace(extract) && TryExtractProperty(json, extract, out var extracted))
+                json = extracted;
+
+            var viewMode = ResolveView(NormalizeView(view), IsListResponse(json));
+            json = ApplyView(json, viewMode);
+
+            if (fields is { Length: > 0 })
+            {
+                var fieldSet = new HashSet<string>(fields, StringComparer.OrdinalIgnoreCase);
+                json = ApplyFieldsToListResponse(json, fieldSet);
+            }
+
+            result.Json = json;
+        }
+
+        return JsonSerializer.Serialize(result, JsonOpts.ForOutput(pretty));
     }
 
     // ── discogs_paginate ─────────────────────────────────────────────────
 
     [McpServerTool(Name = "discogs_paginate"),
-     Description("Fetch multiple pages from a paginated Discogs endpoint and return concatenated items. Specify the 'extract' key to pull items from each page's response (e.g. 'results', 'releases', 'wants', 'listings').")]
+     Description("Fetch multiple pages from a paginated Discogs endpoint and return concatenated items. Specify the 'extract' key to pull items from each page's response (e.g. 'results', 'releases', 'wants', 'listings'). Compact JSON by default with optional view/fields shaping.")]
     public static async Task<string> Paginate(
         IHttpClientFactory httpClientFactory,
         [Description("HTTP method (usually GET)")]
@@ -211,7 +253,13 @@ public static class DiscogsTools
         [Description("Maximum number of pages to fetch (default 5, max 10)")]
         int maxPages = 5,
         [Description("JSON key containing the items array in each response (e.g. 'results', 'releases', 'wants', 'listings')")]
-        string? extract = null)
+        string? extract = null,
+        [Description("Response view: full, light, or auto (default auto)")]
+        string? view = null,
+        [Description("Select a subset of fields from list items or arrays (optional)")]
+        string[]? fields = null,
+        [Description("Pretty-print JSON output (default false)")]
+        bool pretty = false)
     {
         maxPages = Math.Clamp(maxPages, 1, 10);
         perPage = Math.Clamp(perPage, 1, 100);
@@ -221,6 +269,10 @@ public static class DiscogsTools
         int pagesFetched = 0;
         int? lastPage = null;
         int? nextPage = null;
+        var viewMode = ResolveView(NormalizeView(view), true);
+        var fieldSet = fields is { Length: > 0 }
+            ? new HashSet<string>(fields, StringComparer.OrdinalIgnoreCase)
+            : null;
 
         var baseQuery = query != null
             ? new Dictionary<string, string>(query)
@@ -255,17 +307,20 @@ public static class DiscogsTools
                 if (extract != null && json.TryGetProperty(extract, out var items) && items.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var item in items.EnumerateArray())
-                        allItems.Add(item.Clone());
+                        allItems.Add(ProcessItem(item, viewMode, fieldSet));
                 }
                 else if (json.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var item in json.EnumerateArray())
-                        allItems.Add(item.Clone());
+                        allItems.Add(ProcessItem(item, viewMode, fieldSet));
                 }
                 else
                 {
                     // Can't extract, just add the whole response
-                    allItems.Add(json.Clone());
+                    var processed = ApplyView(json, viewMode);
+                    if (fieldSet != null)
+                        processed = ApplyFields(processed, fieldSet);
+                    allItems.Add(processed);
                 }
 
                 // Check if we've reached the last page
@@ -291,7 +346,7 @@ public static class DiscogsTools
             items = allItems
         };
 
-        return JsonSerializer.Serialize(output, JsonOpts.Indented);
+        return JsonSerializer.Serialize(output, JsonOpts.ForOutput(pretty));
     }
 
     // ── Shared HTTP execution ────────────────────────────────────────────
@@ -432,6 +487,460 @@ public static class DiscogsTools
             Text = text
         };
     }
+
+    // ── Response shaping ───────────────────────────────────────────────
+
+    private static string NormalizeView(string? view)
+    {
+        if (string.IsNullOrWhiteSpace(view))
+            return "auto";
+
+        return view.Trim().ToLowerInvariant() switch
+        {
+            "full" => "full",
+            "light" => "light",
+            "auto" => "auto",
+            _ => "auto"
+        };
+    }
+
+    private static string ResolveView(string view, bool isList)
+        => view == "auto" ? (isList ? "light" : "full") : view;
+
+    private static bool TryExtractProperty(JsonElement json, string extract, out JsonElement extracted)
+    {
+        extracted = json;
+        if (json.ValueKind != JsonValueKind.Object)
+            return false;
+
+        var current = json;
+        var segments = extract.Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length == 0)
+            return false;
+
+        foreach (var segment in segments)
+        {
+            if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(segment, out var next))
+                return false;
+            current = next;
+        }
+
+        extracted = current;
+        return true;
+    }
+
+    private static bool IsListResponse(JsonElement json)
+    {
+        if (json.ValueKind == JsonValueKind.Array)
+            return true;
+
+        if (json.ValueKind != JsonValueKind.Object)
+            return false;
+
+        foreach (var key in ListKeys)
+        {
+            if (json.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Array)
+                return true;
+        }
+
+        return false;
+    }
+
+    private static JsonElement ApplyView(JsonElement json, string view)
+    {
+        if (view != "light")
+            return json;
+
+        if (json.ValueKind == JsonValueKind.Array)
+        {
+            var items = new List<object?>();
+            foreach (var item in json.EnumerateArray())
+                items.Add(ToLightItem(item));
+            return JsonSerializer.SerializeToElement(items, JsonOpts.Compact);
+        }
+
+        if (json.ValueKind == JsonValueKind.Object)
+        {
+            var hasList = false;
+            var obj = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var prop in json.EnumerateObject())
+            {
+                if (IsListKey(prop.Name) && prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    var items = new List<object?>();
+                    foreach (var item in prop.Value.EnumerateArray())
+                        items.Add(ToLightItem(item));
+                    obj[prop.Name] = items;
+                    hasList = true;
+                }
+                else
+                {
+                    obj[prop.Name] = prop.Value.Clone();
+                }
+            }
+
+            if (hasList)
+                return JsonSerializer.SerializeToElement(obj, JsonOpts.Compact);
+
+            return ToLightItem(json);
+        }
+
+        return json;
+    }
+
+    private static JsonElement ApplyFields(JsonElement json, IEnumerable<string> fields)
+    {
+        var fieldSet = fields is HashSet<string> set
+            ? set
+            : new HashSet<string>(fields, StringComparer.OrdinalIgnoreCase);
+
+        if (json.ValueKind == JsonValueKind.Array)
+        {
+            var items = new List<object?>();
+            foreach (var item in json.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object)
+                    items.Add(ApplyFields(item, fieldSet));
+                else
+                    items.Add(item.Clone());
+            }
+            return JsonSerializer.SerializeToElement(items, JsonOpts.Compact);
+        }
+
+        if (json.ValueKind != JsonValueKind.Object)
+            return json;
+
+        var obj = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in json.EnumerateObject())
+        {
+            if (fieldSet.Contains(prop.Name))
+                obj[prop.Name] = prop.Value.Clone();
+        }
+
+        return JsonSerializer.SerializeToElement(obj, JsonOpts.Compact);
+    }
+
+    private static JsonElement ApplyFieldsToListResponse(JsonElement json, HashSet<string> fields)
+    {
+        if (json.ValueKind == JsonValueKind.Array)
+            return ApplyFields(json, fields);
+
+        if (json.ValueKind != JsonValueKind.Object)
+            return json;
+
+        var hasList = false;
+        var obj = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var prop in json.EnumerateObject())
+        {
+            if (IsListKey(prop.Name) && prop.Value.ValueKind == JsonValueKind.Array)
+            {
+                var items = new List<object?>();
+                foreach (var item in prop.Value.EnumerateArray())
+                    items.Add(ApplyFields(item, fields));
+                obj[prop.Name] = items;
+                hasList = true;
+            }
+            else
+            {
+                obj[prop.Name] = prop.Value.Clone();
+            }
+        }
+
+        return hasList
+            ? JsonSerializer.SerializeToElement(obj, JsonOpts.Compact)
+            : ApplyFields(json, fields);
+    }
+
+    private static JsonElement ProcessItem(JsonElement item, string viewMode, HashSet<string>? fields)
+    {
+        var processed = ApplyView(item, viewMode);
+        if (fields != null)
+            processed = ApplyFields(processed, fields);
+        return processed;
+    }
+
+    private static JsonElement ToLightItem(JsonElement item)
+    {
+        if (item.ValueKind != JsonValueKind.Object)
+            return item.Clone();
+
+        var source = item;
+        if (item.TryGetProperty("basic_information", out var basicInfo) && basicInfo.ValueKind == JsonValueKind.Object)
+            source = basicInfo;
+        else if (item.TryGetProperty("release", out var release) && release.ValueKind == JsonValueKind.Object)
+            source = release;
+        else if (item.TryGetProperty("master", out var master) && master.ValueKind == JsonValueKind.Object)
+            source = master;
+
+        var id = GetStringOrNumber(item, "id") ?? GetStringOrNumber(source, "id");
+        var title = GetString(source, "title");
+        var artist = GetString(source, "artist") ?? GetArtistFromArray(source, "artists") ?? GetString(source, "artists_sort");
+
+        if (string.IsNullOrWhiteSpace(artist) && !string.IsNullOrWhiteSpace(title))
+        {
+            var parts = title.Split(" - ", 2, StringSplitOptions.None);
+            if (parts.Length == 2)
+            {
+                artist = parts[0].Trim();
+                title = parts[1].Trim();
+            }
+        }
+
+        var label = GetFirstString(source, "label") ?? GetNameFromArray(source, "labels");
+        var catalogNumber = GetString(source, "catno") ?? GetString(source, "catalog_number") ?? GetCatnoFromLabels(source);
+        var barcode = GetFirstString(source, "barcode") ?? GetBarcodeFromIdentifiers(source);
+        var year = GetStringOrNumber(source, "year");
+        var country = GetString(source, "country");
+        var format = GetFormat(source);
+
+        var hasReleaseFields =
+            !string.IsNullOrWhiteSpace(title) ||
+            !string.IsNullOrWhiteSpace(artist) ||
+            !string.IsNullOrWhiteSpace(label) ||
+            !string.IsNullOrWhiteSpace(catalogNumber) ||
+            !string.IsNullOrWhiteSpace(barcode) ||
+            !string.IsNullOrWhiteSpace(year) ||
+            !string.IsNullOrWhiteSpace(country) ||
+            !string.IsNullOrWhiteSpace(format);
+
+        if (hasReleaseFields)
+        {
+            var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["id"] = id,
+                ["title"] = title,
+                ["artist"] = artist,
+                ["label"] = label,
+                ["catalogNumber"] = catalogNumber,
+                ["barcode"] = barcode,
+                ["year"] = year,
+                ["country"] = country,
+                ["format"] = format
+            };
+
+            return JsonSerializer.SerializeToElement(output, JsonOpts.Compact);
+        }
+
+        return ToGenericLightItem(item, id);
+    }
+
+    private static JsonElement ToGenericLightItem(JsonElement item, string? id)
+    {
+        var title = GetString(item, "title")
+            ?? GetString(item, "name")
+            ?? GetString(item, "subject");
+
+        var type = GetString(item, "type") ?? GetString(item, "status");
+        var uri = GetString(item, "uri") ?? GetString(item, "resource_url");
+
+        var output = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["id"] = id,
+            ["title"] = title,
+            ["type"] = type,
+            ["uri"] = uri
+        };
+
+        return JsonSerializer.SerializeToElement(output, JsonOpts.Compact);
+    }
+
+    private static string? GetString(JsonElement obj, string propertyName)
+    {
+        if (!obj.TryGetProperty(propertyName, out var prop))
+            return null;
+
+        return prop.ValueKind switch
+        {
+            JsonValueKind.String => prop.GetString(),
+            JsonValueKind.Number => prop.GetRawText(),
+            _ => null
+        };
+    }
+
+    private static string? GetStringOrNumber(JsonElement obj, string propertyName)
+        => GetString(obj, propertyName);
+
+    private static string? GetFirstString(JsonElement obj, string propertyName)
+    {
+        if (!obj.TryGetProperty(propertyName, out var prop))
+            return null;
+        return GetFirstStringFromElement(prop);
+    }
+
+    private static string? GetFirstStringFromElement(JsonElement element)
+    {
+        return element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.GetRawText(),
+            JsonValueKind.Array => GetFirstStringFromArray(element),
+            JsonValueKind.Object => GetString(element, "name") ?? GetString(element, "title"),
+            _ => null
+        };
+    }
+
+    private static string? GetFirstStringFromArray(JsonElement array)
+    {
+        foreach (var item in array.EnumerateArray())
+        {
+            var value = GetFirstStringFromElement(item);
+            if (!string.IsNullOrWhiteSpace(value))
+                return value;
+        }
+
+        return null;
+    }
+
+    private static string? GetNameFromArray(JsonElement obj, string propertyName)
+    {
+        if (!obj.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var item in prop.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+                return name.GetString();
+        }
+
+        return null;
+    }
+
+    private static string? GetArtistFromArray(JsonElement obj, string propertyName)
+    {
+        if (!obj.TryGetProperty(propertyName, out var prop) || prop.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var item in prop.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+                return name.GetString();
+        }
+
+        return null;
+    }
+
+    private static string? GetCatnoFromLabels(JsonElement obj)
+    {
+        if (!obj.TryGetProperty("labels", out var labels) || labels.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var label in labels.EnumerateArray())
+        {
+            if (label.ValueKind == JsonValueKind.Object && label.TryGetProperty("catno", out var catno))
+                return GetFirstStringFromElement(catno);
+        }
+
+        return null;
+    }
+
+    private static string? GetBarcodeFromIdentifiers(JsonElement obj)
+    {
+        if (!obj.TryGetProperty("identifiers", out var identifiers) || identifiers.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var ident in identifiers.EnumerateArray())
+        {
+            if (ident.ValueKind != JsonValueKind.Object)
+                continue;
+
+            if (ident.TryGetProperty("type", out var typeElement) && typeElement.ValueKind == JsonValueKind.String)
+            {
+                var type = typeElement.GetString() ?? string.Empty;
+                if (!type.Contains("Barcode", StringComparison.OrdinalIgnoreCase))
+                    continue;
+            }
+            else
+            {
+                continue;
+            }
+
+            if (ident.TryGetProperty("value", out var value))
+                return GetFirstStringFromElement(value);
+        }
+
+        return null;
+    }
+
+    private static string? GetFormat(JsonElement obj)
+    {
+        if (obj.TryGetProperty("format", out var format))
+        {
+            var parts = GetStringList(format, 4);
+            if (parts.Count > 0)
+                return string.Join(", ", parts);
+        }
+
+        if (obj.TryGetProperty("formats", out var formats) && formats.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in formats.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                var parts = new List<string>();
+                var name = GetString(item, "name");
+                if (!string.IsNullOrWhiteSpace(name))
+                    parts.Add(name);
+
+                if (item.TryGetProperty("descriptions", out var descriptions))
+                    parts.AddRange(GetStringList(descriptions, 3));
+
+                if (parts.Count > 0)
+                    return string.Join(", ", parts);
+            }
+        }
+
+        return null;
+    }
+
+    private static List<string> GetStringList(JsonElement element, int maxItems)
+    {
+        var list = new List<string>();
+
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            list.Add(element.GetString() ?? string.Empty);
+            return list;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var value = GetFirstStringFromElement(item);
+                if (!string.IsNullOrWhiteSpace(value))
+                    list.Add(value);
+
+                if (list.Count >= maxItems)
+                    break;
+            }
+        }
+
+        return list;
+    }
+
+    private static bool IsListKey(string name)
+        => ListKeys.Contains(name, StringComparer.OrdinalIgnoreCase);
+
+    private static readonly string[] ListKeys = new[]
+    {
+        "results",
+        "releases",
+        "versions",
+        "wants",
+        "listings",
+        "orders",
+        "messages",
+        "items",
+        "lists",
+        "folders",
+        "submissions",
+        "contributions",
+        "list",
+        "data"
+    };
 }
 
 // ─── Request cloning extension ───────────────────────────────────────────────
@@ -486,6 +995,16 @@ public static class JsonOpts
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
+
+    public static readonly JsonSerializerOptions Compact = new()
+    {
+        WriteIndented = false,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
+
+    public static JsonSerializerOptions ForOutput(bool pretty)
+        => pretty ? Indented : Compact;
 }
 
 // ─── Endpoint catalog ────────────────────────────────────────────────────────
